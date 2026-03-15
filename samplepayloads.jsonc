@@ -1,0 +1,23 @@
+{
+    "name": "Test station",
+    "is_open": true,
+    "location": {
+        "type": "Point",
+        "coordinates": [
+            100.4508963,
+            13.8409997
+        ]
+    },
+    "availableFuels": {
+        "Premium Diesel": null,
+        "Diesel": null,
+        "B20": null,
+        "Gasohol 95 (E10)": null,
+        "Gasohol 91 (E10)": null,
+        "E20": null,
+        "Gasoline 95": true,
+        "Premium Gasohol": true,
+        "E85": null
+    },
+    "turnstileToken": "xxx"
+}

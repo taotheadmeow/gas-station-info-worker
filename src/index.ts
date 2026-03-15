@@ -1,330 +1,408 @@
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-import { ObjectId } from 'mongodb';
-import { z } from 'zod';
-import { getStationsCollection } from './db';
-import {
-  stationCreateSchema,
-  stationFuelUpdateSchema,
-  stationUpdateSchema,
-} from './schema';
-import { verifyTurnstileOrThrow } from './turnstile';
-import type { Env, StationDocument } from './types';
-import { clamp, computePinColor, jsonError, parseBoolean } from './utils';
+import { z } from "zod";
 
-const app = new Hono<{ Bindings: Env }>();
+export interface Env {
+  MONGODB_DATA_API_URL: string;
+  MONGODB_DATA_API_KEY: string;
+  MONGODB_DATA_SOURCE: string;
+  MONGODB_DATABASE: string;
+  MONGODB_COLLECTION: string;
+  TURNSTILE_SECRET_KEY: string;
+}
 
-app.use('*', async (c, next) => {
-  const origin = c.env.ALLOWED_ORIGIN || '*';
-  return cors({
-    origin,
-    allowHeaders: ['Content-Type', 'Authorization'],
-    allowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-    credentials: origin !== '*',
-    maxAge: 86400,
-  })(c, next);
-});
+type JsonRecord = Record<string, unknown>;
 
-app.get('/health', async (c) => {
-  const collection = await getStationsCollection(c.env);
-  const count = await collection.countDocuments({});
-  return c.json({
-    success: true,
-    service: 'gas-station-worker',
-    db: c.env.MONGODB_DB_NAME,
-    collection: c.env.MONGODB_COLLECTION_STATIONS,
-    stations: count,
-    time: new Date().toISOString(),
-  });
-});
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+];
 
-app.get('/api/stations', async (c) => {
-  const collection = await getStationsCollection(c.env);
+function getCorsHeaders(request: Request): Record<string, string> {
+  const origin = request.headers.get("Origin") || "";
+  const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
 
-  const lat = Number(c.req.query('lat'));
-  const lng = Number(c.req.query('lng'));
-  const radiusKm = clamp(Number(c.req.query('radiusKm') || '10'), 0.1, 100);
-  const limit = clamp(Number(c.req.query('limit') || '200'), 1, 500);
-  const q = c.req.query('q')?.trim();
-  const onlyOpen = parseBoolean(c.req.query('onlyOpen'), false);
-  const bbox = c.req.query('bbox');
+  return {
+    "Access-Control-Allow-Origin": allowOrigin,
+    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400",
+    Vary: "Origin",
+  };
+}
 
-  const filter: Record<string, unknown> = {};
-  if (onlyOpen) filter.isOpen = true;
-
-  if (q) {
-    filter.$text = { $search: q };
-  }
-
-  if (bbox) {
-    const parts = bbox.split(',').map((v) => Number(v.trim()));
-    if (parts.length !== 4 || parts.some(Number.isNaN)) {
-      return jsonError('bbox must be minLng,minLat,maxLng,maxLat', 400);
-    }
-    const [minLng, minLat, maxLng, maxLat] = parts;
-    filter.location = {
-      $geoWithin: {
-        $box: [
-          [minLng, minLat],
-          [maxLng, maxLat],
-        ],
-      },
-    };
-  } else if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
-    filter.location = {
-      $near: {
-        $geometry: { type: 'Point', coordinates: [lng, lat] },
-        $maxDistance: radiusKm * 1000,
-      },
-    };
-  }
-
-  const cursor = collection.find(filter, {
-    limit,
-    projection: {
-      name: 1,
-      brand: 1,
-      address: 1,
-      province: 1,
-      district: 1,
-      subdistrict: 1,
-      isOpen: 1,
-      open24Hours: 1,
-      note: 1,
-      services: 1,
-      availableFuels: 1,
-      location: 1,
-      pinColor: 1,
-      updatedAt: 1,
-      createdAt: 1,
-      ...(q ? { score: { $meta: 'textScore' } } : {}),
+const json = (request: Request, data: unknown, init: ResponseInit = {}) =>
+  new Response(JSON.stringify(data, null, 2), {
+    ...init,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...getCorsHeaders(request),
+      ...(init.headers || {}),
     },
-    ...(q ? { sort: { score: { $meta: 'textScore' } } } : { sort: { updatedAt: -1 } }),
   });
 
-  const docs = await cursor.toArray();
-  return c.json({
-    success: true,
-    count: docs.length,
-    data: docs.map(serializeStation),
+const errorJson = (
+  request: Request,
+  message: string,
+  status = 400,
+  extra?: JsonRecord
+) =>
+  json(
+    request,
+    {
+      success: false,
+      message,
+      ...(extra || {}),
+    },
+    { status }
+  );
+
+const dateTimeWithOffsetSchema = z.string().refine(
+  (val) => !Number.isNaN(Date.parse(val.replace(" ", "T"))),
+  { message: "Invalid datetime with offset" }
+);
+
+const fuelAvailabilitySchema = z.object({
+  "Premium Diesel": z.boolean().nullable(),
+  Diesel: z.boolean().nullable(),
+  B20: z.boolean().nullable(),
+  "Gasohol 95 (E10)": z.boolean().nullable(),
+  "Gasohol 91 (E10)": z.boolean().nullable(),
+  E20: z.boolean().nullable(),
+  "Gasoline 95": z.boolean().nullable(),
+  "Premium Gasohol": z.boolean().nullable(),
+  E85: z.boolean().nullable(),
+});
+
+const geoPointSchema = z.object({
+  type: z.literal("Point"),
+  coordinates: z
+    .tuple([z.number(), z.number()])
+    .refine(([lng, lat]) => lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90, {
+      message: "Invalid GeoJSON coordinates",
+    }),
+});
+
+const stationBodySchema = z.object({
+  last_updated: dateTimeWithOffsetSchema,
+  location: geoPointSchema,
+  name: z.string().min(1),
+  is_open: z.boolean(),
+  availableFuels: fuelAvailabilitySchema,
+  turnstileToken: z.string().min(1),
+});
+
+async function verifyTurnstileToken(
+  token: string,
+  secretKey: string,
+  request: Request
+): Promise<boolean> {
+  const ip =
+    request.headers.get("cf-connecting-ip") ||
+    request.headers.get("x-forwarded-for") ||
+    "";
+
+  const formData = new FormData();
+  formData.append("secret", secretKey);
+  formData.append("response", token);
+  if (ip) formData.append("remoteip", ip);
+
+  const resp = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+    method: "POST",
+    body: formData,
   });
-});
 
-app.get('/api/stations/:id', async (c) => {
-  const id = c.req.param('id');
-  if (!ObjectId.isValid(id)) return jsonError('Invalid station id', 400);
+  if (!resp.ok) return false;
 
-  const collection = await getStationsCollection(c.env);
-  const station = await collection.findOne({ _id: new ObjectId(id) });
-  if (!station) return jsonError('Station not found', 404);
+  const data = (await resp.json()) as { success?: boolean };
+  return Boolean(data.success);
+}
 
-  return c.json({ success: true, data: serializeStation(station) });
-});
+async function mongoDataApi<T>(
+  env: Env,
+  action: "find" | "findOne" | "insertOne" | "updateOne",
+  body: JsonRecord
+): Promise<T> {
+  const resp = await fetch(`${env.MONGODB_DATA_API_URL}/action/${action}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "api-key": env.MONGODB_DATA_API_KEY,
+    },
+    body: JSON.stringify({
+      dataSource: env.MONGODB_DATA_SOURCE,
+      database: env.MONGODB_DATABASE,
+      collection: env.MONGODB_COLLECTION,
+      ...body,
+    }),
+  });
 
-app.post('/api/stations', async (c) => {
-  const body = await c.req.json().catch(() => null);
-  if (!body) return jsonError('Invalid JSON body', 400);
+  const data = (await resp.json()) as T & { error?: string };
 
-  const parsed = stationCreateSchema.safeParse(body);
-  if (!parsed.success) return validationError(parsed.error);
+  if (!resp.ok || data?.error) {
+    throw new Error(data?.error || "MongoDB Data API error");
+  }
+
+  return data;
+}
+
+function parseCoordinateParam(raw: string | null): { lat: number; lng: number } | null {
+  if (!raw) return null;
+
+  const parts = raw.split(",").map((s) => s.trim());
+  if (parts.length !== 2) return null;
+
+  const lat = Number(parts[0]);
+  const lng = Number(parts[1]);
+
+  if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+
+  return { lat, lng };
+}
+
+function isValidObjectId(id: string): boolean {
+  return /^[a-fA-F0-9]{24}$/.test(id);
+}
+
+function sanitizeStationDoc(doc: JsonRecord): JsonRecord {
+  return {
+    _id: doc._id,
+    last_updated: doc.last_updated,
+    location: doc.location,
+    name: doc.name,
+    is_open: doc.is_open,
+    availableFuels: doc.availableFuels,
+  };
+}
+
+async function handleGetStations(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const coordinate = parseCoordinateParam(url.searchParams.get("coordinate"));
+  const radiusRaw = url.searchParams.get("radius");
+
+  let filter: JsonRecord = {};
+  let sort: JsonRecord = { last_updated: -1 };
+
+  if ((coordinate && radiusRaw === null) || (!coordinate && radiusRaw !== null)) {
+    return errorJson(request, "coordinate and radius must be provided together", 400);
+  }
+
+  if (coordinate && radiusRaw !== null) {
+    const radiusKm = Number(radiusRaw);
+    if (Number.isNaN(radiusKm) || radiusKm < 0) {
+      return errorJson(request, "radius must be a non-negative number", 400);
+    }
+
+    const radiusMeters = Math.round(radiusKm * 1000);
+
+    filter = {
+      location: {
+        $near: {
+          $geometry: {
+            type: "Point",
+            coordinates: [coordinate.lng, coordinate.lat],
+          },
+          $maxDistance: radiusMeters,
+        },
+      },
+    };
+
+    sort = {};
+  }
+
+  const result = await mongoDataApi<{ documents: JsonRecord[] }>(env, "find", {
+    filter,
+    sort,
+    limit: 1000,
+  });
+
+  return json(request, (result.documents || []).map(sanitizeStationDoc), { status: 200 });
+}
+
+async function handlePostStation(request: Request, env: Env): Promise<Response> {
+  let body: unknown;
 
   try {
-    await verifyTurnstileOrThrow(
-      c.env,
-      parsed.data.captchaToken,
-      c.req.header('CF-Connecting-IP') ?? null,
-    );
-  } catch (error) {
-    return jsonError(error instanceof Error ? error.message : 'Captcha verification failed', 400);
+    body = await request.json();
+  } catch {
+    return errorJson(request, "Invalid JSON body", 400);
   }
 
-  const collection = await getStationsCollection(c.env);
-  const now = new Date().toISOString();
+  const parsed = stationBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return errorJson(request, "Validation failed", 400, {
+      errors: parsed.error.flatten(),
+    });
+  }
 
-  const document: StationDocument = {
-    name: parsed.data.name,
-    brand: parsed.data.brand ?? null,
-    address: parsed.data.address ?? null,
-    province: parsed.data.province ?? null,
-    district: parsed.data.district ?? null,
-    subdistrict: parsed.data.subdistrict ?? null,
-    isOpen: parsed.data.isOpen,
-    open24Hours: parsed.data.open24Hours ?? false,
-    note: parsed.data.note ?? null,
-    services: parsed.data.services ?? [],
-    availableFuels: normalizeFuelDates(parsed.data.availableFuels, now),
-    location: {
-      type: 'Point',
-      coordinates: [parsed.data.longitude, parsed.data.latitude],
+  const verified = await verifyTurnstileToken(
+    parsed.data.turnstileToken,
+    env.TURNSTILE_SECRET_KEY,
+    request
+  );
+
+  if (!verified) {
+    return errorJson(request, "Invalid turnstile token", 403);
+  }
+
+  const { turnstileToken, ...stationData } = parsed.data;
+
+  const insertResult = await mongoDataApi<{
+    insertedId: { $oid: string };
+  }>(env, "insertOne", {
+    document: stationData,
+  });
+
+  return json(
+    request,
+    {
+      _id: insertResult.insertedId,
+      ...stationData,
     },
-    pinColor: computePinColor(parsed.data.isOpen, parsed.data.availableFuels),
-    createdAt: now,
-    updatedAt: now,
-  };
+    { status: 201 }
+  );
+}
 
-  const inserted = await collection.insertOne(document);
-  const saved = await collection.findOne({ _id: inserted.insertedId });
-  return c.json({ success: true, data: saved ? serializeStation(saved) : null }, 201);
-});
+async function handlePutStation(
+  request: Request,
+  env: Env,
+  mongoId: string
+): Promise<Response> {
+  if (!isValidObjectId(mongoId)) {
+    return errorJson(request, "Invalid mongo object id", 400);
+  }
 
-app.patch('/api/stations/:id', async (c) => {
-  const id = c.req.param('id');
-  if (!ObjectId.isValid(id)) return jsonError('Invalid station id', 400);
+  let body: unknown;
 
-  const body = await c.req.json().catch(() => null);
-  if (!body) return jsonError('Invalid JSON body', 400);
+  try {
+    body = await request.json();
+  } catch {
+    return errorJson(request, "Invalid JSON body", 400);
+  }
 
-  const parsed = stationUpdateSchema.safeParse(body);
-  if (!parsed.success) return validationError(parsed.error);
+  const parsed = stationBodySchema.safeParse(body);
+  if (!parsed.success) {
+    return errorJson(request, "Validation failed", 400, {
+      errors: parsed.error.flatten(),
+    });
+  }
 
-  const collection = await getStationsCollection(c.env);
-  const existing = await collection.findOne({ _id: new ObjectId(id) });
-  if (!existing) return jsonError('Station not found', 404);
+  const verified = await verifyTurnstileToken(
+    parsed.data.turnstileToken,
+    env.TURNSTILE_SECRET_KEY,
+    request
+  );
 
-  const now = new Date().toISOString();
-  const mergedFuels = parsed.data.availableFuels
-    ? normalizeFuelDates(parsed.data.availableFuels, now)
-    : existing.availableFuels;
+  if (!verified) {
+    return errorJson(request, "Invalid turnstile token", 403);
+  }
 
-  const longitude = parsed.data.longitude ?? existing.location.coordinates[0];
-  const latitude = parsed.data.latitude ?? existing.location.coordinates[1];
-  const isOpen = parsed.data.isOpen ?? existing.isOpen;
+  const { turnstileToken, ...stationData } = parsed.data;
 
-  const updateDoc: Partial<StationDocument> = {
-    ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
-    ...(parsed.data.brand !== undefined ? { brand: parsed.data.brand ?? null } : {}),
-    ...(parsed.data.address !== undefined ? { address: parsed.data.address ?? null } : {}),
-    ...(parsed.data.province !== undefined ? { province: parsed.data.province ?? null } : {}),
-    ...(parsed.data.district !== undefined ? { district: parsed.data.district ?? null } : {}),
-    ...(parsed.data.subdistrict !== undefined ? { subdistrict: parsed.data.subdistrict ?? null } : {}),
-    ...(parsed.data.isOpen !== undefined ? { isOpen } : {}),
-    ...(parsed.data.open24Hours !== undefined ? { open24Hours: parsed.data.open24Hours } : {}),
-    ...(parsed.data.note !== undefined ? { note: parsed.data.note ?? null } : {}),
-    ...(parsed.data.services !== undefined ? { services: parsed.data.services } : {}),
-    ...(parsed.data.availableFuels !== undefined ? { availableFuels: mergedFuels } : {}),
-    ...(parsed.data.latitude !== undefined || parsed.data.longitude !== undefined
-      ? {
-          location: {
-            type: 'Point',
-            coordinates: [longitude, latitude],
-          },
+  const updateResult = await mongoDataApi<{
+    matchedCount: number;
+    modifiedCount: number;
+  }>(env, "updateOne", {
+    filter: {
+      _id: { $oid: mongoId },
+    },
+    update: {
+      $set: stationData,
+    },
+  });
+
+  if (!updateResult.matchedCount) {
+    return errorJson(request, "Station not found", 404);
+  }
+
+  return json(
+    request,
+    {
+      _id: { $oid: mongoId },
+      ...stationData,
+    },
+    { status: 200 }
+  );
+}
+
+async function handleGetStationById(
+  request: Request,
+  env: Env,
+  mongoId: string
+): Promise<Response> {
+  if (!isValidObjectId(mongoId)) {
+    return errorJson(request, "Invalid mongo object id", 400);
+  }
+
+  const result = await mongoDataApi<{ document: JsonRecord | null }>(env, "findOne", {
+    filter: {
+      _id: { $oid: mongoId },
+    },
+  });
+
+  if (!result.document) {
+    return errorJson(request, "Station not found", 404);
+  }
+
+  return json(request, sanitizeStationDoc(result.document), { status: 200 });
+}
+
+async function handleGetPublicPermissions(request: Request): Promise<Response> {
+  return json(
+    request,
+    {
+      create: true,
+      update: true,
+      delete: true,
+    },
+    { status: 200 }
+  );
+}
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    try {
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: getCorsHeaders(request),
+        });
+      }
+
+      const url = new URL(request.url);
+      const pathname = url.pathname;
+      const method = request.method.toUpperCase();
+
+      if (pathname === "/api/stations" && method === "GET") {
+        return await handleGetStations(request, env);
+      }
+
+      if (pathname === "/api/stations" && method === "POST") {
+        return await handlePostStation(request, env);
+      }
+
+      if (pathname === "/api/permissions/public" && method === "GET") {
+        return await handleGetPublicPermissions(request);
+      }
+
+      const stationIdMatch = pathname.match(/^\/api\/stations\/([a-fA-F0-9]{24})$/);
+
+      if (stationIdMatch) {
+        const mongoId = stationIdMatch[1];
+
+        if (method === "GET") {
+          return await handleGetStationById(request, env, mongoId);
         }
-      : {}),
-    pinColor: computePinColor(isOpen, mergedFuels),
-    updatedAt: now,
-  };
 
-  await collection.updateOne({ _id: new ObjectId(id) }, { $set: updateDoc });
-  const updated = await collection.findOne({ _id: new ObjectId(id) });
+        if (method === "PUT") {
+          return await handlePutStation(request, env, mongoId);
+        }
+      }
 
-  return c.json({ success: true, data: updated ? serializeStation(updated) : null });
-});
-
-app.patch('/api/stations/:id/fuels', async (c) => {
-  const id = c.req.param('id');
-  if (!ObjectId.isValid(id)) return jsonError('Invalid station id', 400);
-
-  const body = await c.req.json().catch(() => null);
-  if (!body) return jsonError('Invalid JSON body', 400);
-
-  const parsed = stationFuelUpdateSchema.safeParse(body);
-  if (!parsed.success) return validationError(parsed.error);
-
-  const collection = await getStationsCollection(c.env);
-  const existing = await collection.findOne({ _id: new ObjectId(id) });
-  if (!existing) return jsonError('Station not found', 404);
-
-  const now = new Date().toISOString();
-  const fuels = normalizeFuelDates(parsed.data.availableFuels, now);
-  const pinColor = computePinColor(existing.isOpen, fuels);
-
-  await collection.updateOne(
-    { _id: new ObjectId(id) },
-    {
-      $set: {
-        availableFuels: fuels,
-        pinColor,
-        updatedAt: now,
-      },
-    },
-  );
-
-  const updated = await collection.findOne({ _id: new ObjectId(id) });
-  return c.json({ success: true, data: updated ? serializeStation(updated) : null });
-});
-
-app.delete('/api/stations/:id', async (c) => {
-  const id = c.req.param('id');
-  if (!ObjectId.isValid(id)) return jsonError('Invalid station id', 400);
-
-  const authToken = c.env.API_AUTH_TOKEN?.trim();
-  if (authToken) {
-    const header = c.req.header('Authorization')?.replace(/^Bearer\s+/i, '')?.trim();
-    if (header !== authToken) return jsonError('Unauthorized', 401);
-  }
-
-  const collection = await getStationsCollection(c.env);
-  const result = await collection.deleteOne({ _id: new ObjectId(id) });
-  if (result.deletedCount === 0) return jsonError('Station not found', 404);
-
-  return c.json({ success: true });
-});
-
-app.onError((err) => {
-  console.error(err);
-  return Response.json(
-    {
-      success: false,
-      error: err instanceof Error ? err.message : 'Internal server error',
-    },
-    { status: 500 },
-  );
-});
-
-export default app;
-
-function serializeStation(doc: StationDocument & { _id?: unknown }) {
-  return {
-    id: doc._id instanceof ObjectId ? doc._id.toHexString() : String(doc._id),
-    name: doc.name,
-    brand: doc.brand ?? null,
-    address: doc.address ?? null,
-    province: doc.province ?? null,
-    district: doc.district ?? null,
-    subdistrict: doc.subdistrict ?? null,
-    isOpen: doc.isOpen,
-    open24Hours: doc.open24Hours ?? false,
-    note: doc.note ?? null,
-    services: doc.services ?? [],
-    availableFuels: doc.availableFuels ?? [],
-    location: {
-      latitude: doc.location.coordinates[1],
-      longitude: doc.location.coordinates[0],
-    },
-    pinColor: doc.pinColor,
-    createdAt: doc.createdAt,
-    updatedAt: doc.updatedAt,
-  };
-}
-
-function normalizeFuelDates(
-  fuels: Array<{ type: StationDocument['availableFuels'][number]['type']; status: StationDocument['availableFuels'][number]['status']; updatedAt?: string }>,
-  fallbackDate: string,
-) {
-  return fuels.map((item) => ({
-    type: item.type,
-    status: item.status,
-    updatedAt: item.updatedAt ?? fallbackDate,
-  }));
-}
-
-function validationError(error: z.ZodError) {
-  return Response.json(
-    {
-      success: false,
-      error: 'Validation failed',
-      details: error.flatten(),
-    },
-    { status: 400 },
-  );
-}
+      return errorJson(request, "Not found", 404);
+    } catch (error) {
+      return errorJson(request, "Internal server error", 500, {
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+};
