@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gas-station-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-03-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "MONGODB_DB_NAME": "gas_station",
+    "MONGODB_COLLECTION_STATIONS": "stations",
+    "ALLOWED_ORIGIN": "http://localhost:3000",
+    "REQUIRE_TURNSTILE_ON_CREATE": "true"
+  }
+}

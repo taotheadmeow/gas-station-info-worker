@@ -1,0 +1,7 @@
+MONGODB_URI=mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority&appName=gas-station
+MONGODB_DB_NAME=gas_station
+MONGODB_COLLECTION_STATIONS=stations
+ALLOWED_ORIGIN=http://localhost:3000
+TURNSTILE_SECRET_KEY=your-cloudflare-turnstile-secret
+REQUIRE_TURNSTILE_ON_CREATE=true
+API_AUTH_TOKEN=
