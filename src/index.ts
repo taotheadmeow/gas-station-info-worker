@@ -1,11 +1,7 @@
 import { z } from "zod";
 
 export interface Env {
-  MONGODB_DATA_API_URL: string;
-  MONGODB_DATA_API_KEY: string;
-  MONGODB_DATA_SOURCE: string;
-  MONGODB_DATABASE: string;
-  MONGODB_COLLECTION: string;
+  DB: D1Database;
   TURNSTILE_SECRET_KEY: string;
 }
 
@@ -55,21 +51,23 @@ const errorJson = (
     { status }
   );
 
+const nullableBoolSchema = z.boolean().nullable();
+
 const dateTimeWithOffsetSchema = z.string().refine(
   (val) => !Number.isNaN(Date.parse(val.replace(" ", "T"))),
   { message: "Invalid datetime with offset" }
 );
 
 const fuelAvailabilitySchema = z.object({
-  "Premium Diesel": z.boolean().nullable(),
-  Diesel: z.boolean().nullable(),
-  B20: z.boolean().nullable(),
-  "Gasohol 95 (E10)": z.boolean().nullable(),
-  "Gasohol 91 (E10)": z.boolean().nullable(),
-  E20: z.boolean().nullable(),
-  "Gasoline 95": z.boolean().nullable(),
-  "Premium Gasohol": z.boolean().nullable(),
-  E85: z.boolean().nullable(),
+  "Premium Diesel": nullableBoolSchema,
+  Diesel: nullableBoolSchema,
+  B20: nullableBoolSchema,
+  "Gasohol 95 (E10)": nullableBoolSchema,
+  "Gasohol 91 (E10)": nullableBoolSchema,
+  E20: nullableBoolSchema,
+  "Gasoline 95": nullableBoolSchema,
+  "Premium Gasohol": nullableBoolSchema,
+  E85: nullableBoolSchema,
 });
 
 const geoPointSchema = z.object({
@@ -89,6 +87,56 @@ const stationBodySchema = z.object({
   availableFuels: fuelAvailabilitySchema,
   turnstileToken: z.string().min(1),
 });
+
+type StationRow = {
+  id: string;
+  last_updated: string;
+  lat: number;
+  lng: number;
+  name: string;
+  is_open: number;
+
+  premium_diesel_available: number | null;
+  diesel_available: number | null;
+  b20_available: number | null;
+  gasohol_95_e10_available: number | null;
+  gasohol_91_e10_available: number | null;
+  e20_available: number | null;
+  gasoline_95_available: number | null;
+  premium_gasohol_available: number | null;
+  e85_available: number | null;
+};
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value
+  );
+}
+
+function parseCoordinateParam(raw: string | null): { lat: number; lng: number } | null {
+  if (!raw) return null;
+
+  const parts = raw.split(",").map((s) => s.trim());
+  if (parts.length !== 2) return null;
+
+  const lat = Number(parts[0]);
+  const lng = Number(parts[1]);
+
+  if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+
+  return { lat, lng };
+}
+
+function dbBoolToJsonBool(value: number | null): boolean | null {
+  if (value === null || value === undefined) return null;
+  return value === 1;
+}
+
+function jsonBoolToDbBool(value: boolean | null): number | null {
+  if (value === null || value === undefined) return null;
+  return value ? 1 : 0;
+}
 
 async function verifyTurnstileToken(
   token: string,
@@ -116,71 +164,66 @@ async function verifyTurnstileToken(
   return Boolean(data.success);
 }
 
-async function mongoDataApi<T>(
-  env: Env,
-  action: "find" | "findOne" | "insertOne" | "updateOne",
-  body: JsonRecord
-): Promise<T> {
-  const resp = await fetch(`${env.MONGODB_DATA_API_URL}/action/${action}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "api-key": env.MONGODB_DATA_API_KEY,
-    },
-    body: JSON.stringify({
-      dataSource: env.MONGODB_DATA_SOURCE,
-      database: env.MONGODB_DATABASE,
-      collection: env.MONGODB_COLLECTION,
-      ...body,
-    }),
-  });
-
-  const data = (await resp.json()) as T & { error?: string };
-
-  if (!resp.ok || data?.error) {
-    throw new Error(data?.error || "MongoDB Data API error");
-  }
-
-  return data;
-}
-
-function parseCoordinateParam(raw: string | null): { lat: number; lng: number } | null {
-  if (!raw) return null;
-
-  const parts = raw.split(",").map((s) => s.trim());
-  if (parts.length !== 2) return null;
-
-  const lat = Number(parts[0]);
-  const lng = Number(parts[1]);
-
-  if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
-
-  return { lat, lng };
-}
-
-function isValidObjectId(id: string): boolean {
-  return /^[a-fA-F0-9]{24}$/.test(id);
-}
-
-function sanitizeStationDoc(doc: JsonRecord): JsonRecord {
+function mapRowToStation(row: StationRow) {
   return {
-    _id: doc._id,
-    last_updated: doc.last_updated,
-    location: doc.location,
-    name: doc.name,
-    is_open: doc.is_open,
-    availableFuels: doc.availableFuels,
+    id: row.id,
+    last_updated: row.last_updated,
+    location: {
+      type: "Point",
+      coordinates: [row.lng, row.lat] as [number, number],
+    },
+    name: row.name,
+    is_open: Boolean(row.is_open),
+    availableFuels: {
+      "Premium Diesel": dbBoolToJsonBool(row.premium_diesel_available),
+      Diesel: dbBoolToJsonBool(row.diesel_available),
+      B20: dbBoolToJsonBool(row.b20_available),
+      "Gasohol 95 (E10)": dbBoolToJsonBool(row.gasohol_95_e10_available),
+      "Gasohol 91 (E10)": dbBoolToJsonBool(row.gasohol_91_e10_available),
+      E20: dbBoolToJsonBool(row.e20_available),
+      "Gasoline 95": dbBoolToJsonBool(row.gasoline_95_available),
+      "Premium Gasohol": dbBoolToJsonBool(row.premium_gasohol_available),
+      E85: dbBoolToJsonBool(row.e85_available),
+    },
   };
+}
+
+function stationSelectColumns(): string {
+  return `
+    id,
+    last_updated,
+    lat,
+    lng,
+    name,
+    is_open,
+    premium_diesel_available,
+    diesel_available,
+    b20_available,
+    gasohol_95_e10_available,
+    gasohol_91_e10_available,
+    e20_available,
+    gasoline_95_available,
+    premium_gasohol_available,
+    e85_available
+  `;
+}
+
+async function handleGetPublicPermissions(request: Request): Promise<Response> {
+  return json(
+    request,
+    {
+      create: true,
+      update: true,
+      delete: true,
+    },
+    { status: 200 }
+  );
 }
 
 async function handleGetStations(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const coordinate = parseCoordinateParam(url.searchParams.get("coordinate"));
   const radiusRaw = url.searchParams.get("radius");
-
-  let filter: JsonRecord = {};
-  let sort: JsonRecord = { last_updated: -1 };
 
   if ((coordinate && radiusRaw === null) || (!coordinate && radiusRaw !== null)) {
     return errorJson(request, "coordinate and radius must be provided together", 400);
@@ -192,30 +235,80 @@ async function handleGetStations(request: Request, env: Env): Promise<Response> 
       return errorJson(request, "radius must be a non-negative number", 400);
     }
 
-    const radiusMeters = Math.round(radiusKm * 1000);
+    const stmt = env.DB.prepare(`
+      SELECT
+        ${stationSelectColumns()},
+        (
+          6371 * acos(
+            cos(radians(?)) *
+            cos(radians(lat)) *
+            cos(radians(lng) - radians(?)) +
+            sin(radians(?)) *
+            sin(radians(lat))
+          )
+        ) AS distance_km
+      FROM stations
+      WHERE (
+        6371 * acos(
+          cos(radians(?)) *
+          cos(radians(lat)) *
+          cos(radians(lng) - radians(?)) +
+          sin(radians(?)) *
+          sin(radians(lat))
+        )
+      ) <= ?
+      ORDER BY distance_km ASC, last_updated DESC
+      LIMIT 1000
+    `).bind(
+      coordinate.lat,
+      coordinate.lng,
+      coordinate.lat,
+      coordinate.lat,
+      coordinate.lng,
+      coordinate.lat,
+      radiusKm
+    );
 
-    filter = {
-      location: {
-        $near: {
-          $geometry: {
-            type: "Point",
-            coordinates: [coordinate.lng, coordinate.lat],
-          },
-          $maxDistance: radiusMeters,
-        },
-      },
-    };
-
-    sort = {};
+    const result = await stmt.all<StationRow & { distance_km: number }>();
+    return json(request, (result.results || []).map(mapRowToStation), { status: 200 });
   }
 
-  const result = await mongoDataApi<{ documents: JsonRecord[] }>(env, "find", {
-    filter,
-    sort,
-    limit: 1000,
-  });
+  const stmt = env.DB.prepare(`
+    SELECT
+      ${stationSelectColumns()}
+    FROM stations
+    ORDER BY last_updated DESC, id DESC
+    LIMIT 1000
+  `);
 
-  return json(request, (result.documents || []).map(sanitizeStationDoc), { status: 200 });
+  const result = await stmt.all<StationRow>();
+  return json(request, (result.results || []).map(mapRowToStation), { status: 200 });
+}
+
+async function handleGetStationById(
+  request: Request,
+  env: Env,
+  stationId: string
+): Promise<Response> {
+  if (!isUuid(stationId)) {
+    return errorJson(request, "Invalid station id", 400);
+  }
+
+  const stmt = env.DB.prepare(`
+    SELECT
+      ${stationSelectColumns()}
+    FROM stations
+    WHERE id = ?
+    LIMIT 1
+  `).bind(stationId);
+
+  const row = await stmt.first<StationRow>();
+
+  if (!row) {
+    return errorJson(request, "Station not found", 404);
+  }
+
+  return json(request, mapRowToStation(row), { status: 200 });
 }
 
 async function handlePostStation(request: Request, env: Env): Promise<Response> {
@@ -245,17 +338,51 @@ async function handlePostStation(request: Request, env: Env): Promise<Response> 
   }
 
   const { turnstileToken, ...stationData } = parsed.data;
+  const [lng, lat] = stationData.location.coordinates;
+  const id = crypto.randomUUID();
 
-  const insertResult = await mongoDataApi<{
-    insertedId: { $oid: string };
-  }>(env, "insertOne", {
-    document: stationData,
-  });
+  const insertStmt = env.DB.prepare(`
+    INSERT INTO stations (
+      id,
+      last_updated,
+      lat,
+      lng,
+      name,
+      is_open,
+      premium_diesel_available,
+      diesel_available,
+      b20_available,
+      gasohol_95_e10_available,
+      gasohol_91_e10_available,
+      e20_available,
+      gasoline_95_available,
+      premium_gasohol_available,
+      e85_available
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    id,
+    stationData.last_updated,
+    lat,
+    lng,
+    stationData.name,
+    stationData.is_open ? 1 : 0,
+    jsonBoolToDbBool(stationData.availableFuels["Premium Diesel"]),
+    jsonBoolToDbBool(stationData.availableFuels["Diesel"]),
+    jsonBoolToDbBool(stationData.availableFuels["B20"]),
+    jsonBoolToDbBool(stationData.availableFuels["Gasohol 95 (E10)"]),
+    jsonBoolToDbBool(stationData.availableFuels["Gasohol 91 (E10)"]),
+    jsonBoolToDbBool(stationData.availableFuels["E20"]),
+    jsonBoolToDbBool(stationData.availableFuels["Gasoline 95"]),
+    jsonBoolToDbBool(stationData.availableFuels["Premium Gasohol"]),
+    jsonBoolToDbBool(stationData.availableFuels["E85"])
+  );
+
+  await insertStmt.run();
 
   return json(
     request,
     {
-      _id: insertResult.insertedId,
+      id,
       ...stationData,
     },
     { status: 201 }
@@ -265,10 +392,10 @@ async function handlePostStation(request: Request, env: Env): Promise<Response> 
 async function handlePutStation(
   request: Request,
   env: Env,
-  mongoId: string
+  stationId: string
 ): Promise<Response> {
-  if (!isValidObjectId(mongoId)) {
-    return errorJson(request, "Invalid mongo object id", 400);
+  if (!isUuid(stationId)) {
+    return errorJson(request, "Invalid station id", 400);
   }
 
   let body: unknown;
@@ -297,62 +424,81 @@ async function handlePutStation(
   }
 
   const { turnstileToken, ...stationData } = parsed.data;
+  const [lng, lat] = stationData.location.coordinates;
 
-  const updateResult = await mongoDataApi<{
-    matchedCount: number;
-    modifiedCount: number;
-  }>(env, "updateOne", {
-    filter: {
-      _id: { $oid: mongoId },
-    },
-    update: {
-      $set: stationData,
-    },
-  });
+  const updateStmt = env.DB.prepare(`
+    UPDATE stations
+    SET
+      last_updated = ?,
+      lat = ?,
+      lng = ?,
+      name = ?,
+      is_open = ?,
+      premium_diesel_available = ?,
+      diesel_available = ?,
+      b20_available = ?,
+      gasohol_95_e10_available = ?,
+      gasohol_91_e10_available = ?,
+      e20_available = ?,
+      gasoline_95_available = ?,
+      premium_gasohol_available = ?,
+      e85_available = ?
+    WHERE id = ?
+  `).bind(
+    stationData.last_updated,
+    lat,
+    lng,
+    stationData.name,
+    stationData.is_open ? 1 : 0,
+    jsonBoolToDbBool(stationData.availableFuels["Premium Diesel"]),
+    jsonBoolToDbBool(stationData.availableFuels["Diesel"]),
+    jsonBoolToDbBool(stationData.availableFuels["B20"]),
+    jsonBoolToDbBool(stationData.availableFuels["Gasohol 95 (E10)"]),
+    jsonBoolToDbBool(stationData.availableFuels["Gasohol 91 (E10)"]),
+    jsonBoolToDbBool(stationData.availableFuels["E20"]),
+    jsonBoolToDbBool(stationData.availableFuels["Gasoline 95"]),
+    jsonBoolToDbBool(stationData.availableFuels["Premium Gasohol"]),
+    jsonBoolToDbBool(stationData.availableFuels["E85"]),
+    stationId
+  );
 
-  if (!updateResult.matchedCount) {
+  const result = await updateStmt.run();
+
+  if (!result.meta.changes) {
     return errorJson(request, "Station not found", 404);
   }
 
   return json(
     request,
     {
-      _id: { $oid: mongoId },
+      id: stationId,
       ...stationData,
     },
     { status: 200 }
   );
 }
 
-async function handleGetStationById(
+async function handleDeleteStation(
   request: Request,
   env: Env,
-  mongoId: string
+  stationId: string
 ): Promise<Response> {
-  if (!isValidObjectId(mongoId)) {
-    return errorJson(request, "Invalid mongo object id", 400);
+  if (!isUuid(stationId)) {
+    return errorJson(request, "Invalid station id", 400);
   }
 
-  const result = await mongoDataApi<{ document: JsonRecord | null }>(env, "findOne", {
-    filter: {
-      _id: { $oid: mongoId },
-    },
-  });
+  const stmt = env.DB.prepare(`DELETE FROM stations WHERE id = ?`).bind(stationId);
+  const result = await stmt.run();
 
-  if (!result.document) {
+  if (!result.meta.changes) {
     return errorJson(request, "Station not found", 404);
   }
 
-  return json(request, sanitizeStationDoc(result.document), { status: 200 });
-}
-
-async function handleGetPublicPermissions(request: Request): Promise<Response> {
   return json(
     request,
     {
-      create: true,
-      update: true,
-      delete: true,
+      success: true,
+      deletedId: stationId,
     },
     { status: 200 }
   );
@@ -372,6 +518,10 @@ export default {
       const pathname = url.pathname;
       const method = request.method.toUpperCase();
 
+      if (pathname === "/api/permissions/public" && method === "GET") {
+        return await handleGetPublicPermissions(request);
+      }
+
       if (pathname === "/api/stations" && method === "GET") {
         return await handleGetStations(request, env);
       }
@@ -380,21 +530,21 @@ export default {
         return await handlePostStation(request, env);
       }
 
-      if (pathname === "/api/permissions/public" && method === "GET") {
-        return await handleGetPublicPermissions(request);
-      }
-
-      const stationIdMatch = pathname.match(/^\/api\/stations\/([a-fA-F0-9]{24})$/);
+      const stationIdMatch = pathname.match(/^\/api\/stations\/([0-9a-fA-F-]{36})$/);
 
       if (stationIdMatch) {
-        const mongoId = stationIdMatch[1];
+        const stationId = stationIdMatch[1];
 
         if (method === "GET") {
-          return await handleGetStationById(request, env, mongoId);
+          return await handleGetStationById(request, env, stationId);
         }
 
         if (method === "PUT") {
-          return await handlePutStation(request, env, mongoId);
+          return await handlePutStation(request, env, stationId);
+        }
+
+        if (method === "DELETE") {
+          return await handleDeleteStation(request, env, stationId);
         }
       }
 
