@@ -8,7 +8,6 @@ export interface Env {
 
 type JsonRecord = Record<string, unknown>;
 
-
 function getCorsHeaders(request: Request, env: Env): Record<string, string> {
   const origin = request.headers.get("Origin") || "";
   const allowOriginFromEnv: string[] = [env.ALLOWED_ORIGIN];
@@ -23,12 +22,12 @@ function getCorsHeaders(request: Request, env: Env): Record<string, string> {
   };
 }
 
-const json = (request: Request, data: unknown, init: ResponseInit = {}, env: Env) =>
+const json = (request: Request, data: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(data, null, 2), {
     ...init,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      ...getCorsHeaders(request, env),
+      ...getCorsHeaders(request),
       ...(init.headers || {}),
     },
   });
@@ -206,7 +205,7 @@ function stationSelectColumns(): string {
   `;
 }
 
-async function handleGetPublicPermissions(request: Request, env: Env): Promise<Response> {
+async function handleGetPublicPermissions(request: Request): Promise<Response> {
   return json(
     request,
     {
@@ -214,8 +213,7 @@ async function handleGetPublicPermissions(request: Request, env: Env): Promise<R
       update: true,
       delete: true,
     },
-    { status: 200 },
-    env
+    { status: 200 }
   );
 }
 
@@ -269,7 +267,7 @@ async function handleGetStations(request: Request, env: Env): Promise<Response> 
     );
 
     const result = await stmt.all<StationRow & { distance_km: number }>();
-    return json(request, (result.results || []).map(mapRowToStation), { status: 200 }, env);
+    return json(request, (result.results || []).map(mapRowToStation), { status: 200 });
   }
 
   const stmt = env.DB.prepare(`
@@ -281,7 +279,7 @@ async function handleGetStations(request: Request, env: Env): Promise<Response> 
   `);
 
   const result = await stmt.all<StationRow>();
-  return json(request, (result.results || []).map(mapRowToStation), { status: 200 }, env);
+  return json(request, (result.results || []).map(mapRowToStation), { status: 200 });
 }
 
 async function handleGetStationById(
@@ -307,7 +305,7 @@ async function handleGetStationById(
     return errorJson(request, "Station not found", 404);
   }
 
-  return json(request, mapRowToStation(row), { status: 200 }, env);
+  return json(request, mapRowToStation(row), { status: 200 });
 }
 
 async function handlePostStation(request: Request, env: Env): Promise<Response> {
@@ -384,7 +382,7 @@ async function handlePostStation(request: Request, env: Env): Promise<Response> 
       id,
       ...stationData,
     },
-    { status: 201 }, env
+    { status: 201 }
   );
 }
 
@@ -473,8 +471,7 @@ async function handlePutStation(
       id: stationId,
       ...stationData,
     },
-    { status: 200 },
-    env
+    { status: 200 }
   );
 }
 
@@ -500,8 +497,7 @@ async function handleDeleteStation(
       success: true,
       deletedId: stationId,
     },
-    { status: 200 },
-    env
+    { status: 200 }
   );
 }
 
@@ -511,7 +507,7 @@ export default {
       if (request.method === "OPTIONS") {
         return new Response(null, {
           status: 204,
-          headers: getCorsHeaders(request, env),
+          headers: getCorsHeaders(request),
         });
       }
 
@@ -520,7 +516,7 @@ export default {
       const method = request.method.toUpperCase();
 
       if (pathname === "/api/permissions/public" && method === "GET") {
-        return await handleGetPublicPermissions(request, env);
+        return await handleGetPublicPermissions(request);
       }
 
       if (pathname === "/api/stations" && method === "GET") {
