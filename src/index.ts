@@ -79,7 +79,7 @@ const geoPointSchema = z.object({
 });
 
 const stationBodySchema = z.object({
-  last_updated: dateTimeWithOffsetSchema,
+  //last_updated: dateTimeWithOffsetSchema,
   location: geoPointSchema,
   name: z.string().min(1),
   is_open: z.boolean(),
@@ -339,7 +339,7 @@ async function handlePostStation(request: Request, env: Env): Promise<Response> 
   const { turnstileToken, ...stationData } = parsed.data;
   const [lng, lat] = stationData.location.coordinates;
   const id = crypto.randomUUID();
-
+  let nowdt = new Date();
   const insertStmt = env.DB.prepare(`
     INSERT INTO stations (
       id,
@@ -360,7 +360,7 @@ async function handlePostStation(request: Request, env: Env): Promise<Response> 
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     id,
-    stationData.last_updated,
+    nowdt.toISOString(),
     lat,
     lng,
     stationData.name,
@@ -424,7 +424,7 @@ async function handlePutStation(
 
   const { turnstileToken, ...stationData } = parsed.data;
   const [lng, lat] = stationData.location.coordinates;
-
+  let nowdt = new Date();
   const updateStmt = env.DB.prepare(`
     UPDATE stations
     SET
@@ -444,7 +444,7 @@ async function handlePutStation(
       e85_available = ?
     WHERE id = ?
   `).bind(
-    stationData.last_updated,
+    nowdt.toISOString(),
     lat,
     lng,
     stationData.name,
