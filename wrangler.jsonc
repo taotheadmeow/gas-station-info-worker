@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "gas-station-worker",
+  "name": "gas-station-info-worker",
   "main": "src/index.ts",
   "compatibility_date": "2026-03-15",
   "compatibility_flags": ["nodejs_compat"],
