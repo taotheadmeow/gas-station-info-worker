@@ -6,11 +6,13 @@ export interface Env {
   ALLOWED_ORIGIN: string;
 }
 
+let ALLOWED_ORIGIN: string = 'http://localhost:3000';
+
 type JsonRecord = Record<string, unknown>;
 
-function getCorsHeaders(request: Request, env: Env): Record<string, string> {
+function getCorsHeaders(request: Request): Record<string, string> {
   const origin = request.headers.get("Origin") || "";
-  const allowOriginFromEnv: string[] = [env.ALLOWED_ORIGIN];
+  const allowOriginFromEnv: string[] = [ALLOWED_ORIGIN];
   const allowOrigin = allowOriginFromEnv.includes(origin) ? origin : allowOriginFromEnv[0];
 
   return {
@@ -503,6 +505,7 @@ async function handleDeleteStation(
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    ALLOWED_ORIGIN = env.ALLOWED_ORIGIN;
     try {
       if (request.method === "OPTIONS") {
         return new Response(null, {
