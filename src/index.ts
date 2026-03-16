@@ -3,18 +3,15 @@ import { z } from "zod";
 export interface Env {
   DB: D1Database;
   TURNSTILE_SECRET_KEY: string;
+  ALLOWED_ORIGIN: string;
 }
 
 type JsonRecord = Record<string, unknown>;
 
-const ALLOWED_ORIGINS = [
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-];
-
-function getCorsHeaders(request: Request): Record<string, string> {
+function getCorsHeaders(request: Request, env: Env): Record<string, string> {
   const origin = request.headers.get("Origin") || "";
-  const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  const allowOriginFromEnv: string[] = [env.ALLOWED_ORIGIN];
+  const allowOrigin = allowOriginFromEnv.includes(origin) ? origin : allowOriginFromEnv[0];
 
   return {
     "Access-Control-Allow-Origin": allowOrigin,
