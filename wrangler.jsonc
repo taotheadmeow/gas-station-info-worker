@@ -5,8 +5,7 @@
   "compatibility_date": "2026-03-15",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "ALLOWED_ORIGIN": "http://localhost:3000",
-    "REQUIRE_TURNSTILE_ON_CREATE": "true",
-    "TURNSTILE_SECRET_KEY": ""
+    "ALLOWED_ORIGIN": "https://pumpnammun.taotheadmeow.dev",
+    "REQUIRE_TURNSTILE_ON_CREATE": "true"
   }
 }
