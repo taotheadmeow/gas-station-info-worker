@@ -87,6 +87,15 @@ const stationBodySchema = z.object({
   turnstileToken: z.string().min(1),
 });
 
+type PermissionRow = {
+  id: string;
+  name: string | null;
+  read: number;
+  write: number;
+  update: number;
+  delete: number;
+}
+
 type StationRow = {
   id: string;
   last_updated: string;
@@ -207,13 +216,16 @@ function stationSelectColumns(): string {
   `;
 }
 
-async function handleGetPublicPermissions(request: Request): Promise<Response> {
+async function handleGetPublicPermissions(request: Request, env: Env): Promise<Response> {
+  const stmt1 = env.DB.prepare(`SELECT * FROM permissions WHERE id = 1`);
+  const row1 = await stmt1.first<PermissionRow>();
+
   return json(
     request,
     {
-      create: true,
-      update: true,
-      delete: true,
+      create: row1?.write ?? false,
+      update: row1?.update ?? false,
+      delete: row1?.delete ?? false,
     },
     { status: 200 }
   );
@@ -393,6 +405,11 @@ async function handlePutStation(
   env: Env,
   stationId: string
 ): Promise<Response> {
+  const stmt1 = env.DB.prepare(`SELECT * FROM permissions WHERE id = 1`);
+  const row1 = await stmt1.first<PermissionRow>();
+  if ((row1?.update ?? 0) == 0) {
+    return errorJson(request, "Permission Denied", 403);
+  }
   if (!isUuid(stationId)) {
     return errorJson(request, "Invalid station id", 400);
   }
@@ -482,6 +499,12 @@ async function handleDeleteStation(
   env: Env,
   stationId: string
 ): Promise<Response> {
+  const stmt1 = env.DB.prepare(`SELECT * FROM permissions WHERE id = 1`);
+  const row1 = await stmt1.first<PermissionRow>();
+  if ((row1?.delete ?? 0) == 0) {
+    return errorJson(request, "Permission Denied", 403);
+  }
+  
   if (!isUuid(stationId)) {
     return errorJson(request, "Invalid station id", 400);
   }
@@ -519,7 +542,7 @@ export default {
       const method = request.method.toUpperCase();
 
       if (pathname === "/api/permissions/public" && method === "GET") {
-        return await handleGetPublicPermissions(request);
+        return await handleGetPublicPermissions(request, env);
       }
 
       if (pathname === "/api/stations" && method === "GET") {
